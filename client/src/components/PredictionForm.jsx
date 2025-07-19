@@ -151,7 +151,7 @@ const handleSubmit = async (e) => {
     };
 
     const response = await axios.post(
-      "http://127.0.0.1:8000/predict",
+      import.meta.env.VITE_BACKEND_URL + "/predict", // Use environment variable for backend URL
       backendData,  // Axios automatically stringifies to JSON
       {
         headers: {
