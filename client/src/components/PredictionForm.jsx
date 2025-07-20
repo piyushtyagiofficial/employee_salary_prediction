@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Calculator, TrendingUp, TrendingDown } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { Calculator, TrendingUp, TrendingDown, Server, Wifi } from "lucide-react";
 import axios from "axios";
 
 const PredictionForm = () => {
@@ -19,6 +19,49 @@ const PredictionForm = () => {
   const [prediction, setPrediction] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [loadingPhase, setLoadingPhase] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState("");
+  const [apiResponseTime, setApiResponseTime] = useState(0);
+  const simulationTimeoutRef = useRef([]);
+
+  // Loading phases with messages
+  const loadingPhases = [
+    { message: "Connecting to server...", duration: 3000 },
+    { message: "Server is starting up...", duration: 15000 },
+    { message: "Loading ML model...", duration: 10000 },
+    { message: "Preparing prediction...", duration: 5000 },
+    { message: "Finalizing results...", duration: 0 }
+  ];
+
+  // Progress through loading phases
+ useEffect(() => {
+    if (!isLoading) return;
+
+    // Clear any existing timeouts
+    simulationTimeoutRef.current.forEach(timeout => clearTimeout(timeout));
+    simulationTimeoutRef.current = [];
+    
+    let currentTime = 0;
+    const newTimeouts = [];
+
+    loadingPhases.forEach((phase, index) => {
+      const timeout = setTimeout(() => {
+        if (isLoading) {
+          setLoadingPhase(index);
+          setLoadingMessage(phase.message);
+        }
+      }, currentTime);
+      
+      newTimeouts.push(timeout);
+      currentTime += phase.duration;
+    });
+
+    simulationTimeoutRef.current = newTimeouts;
+
+    return () => {
+      simulationTimeoutRef.current.forEach(timeout => clearTimeout(timeout));
+    };
+  }, [isLoading]);
 
   const workclassOptions = [
     "Private",
@@ -126,54 +169,85 @@ const PredictionForm = () => {
     }));
   };
 
-const handleSubmit = async (e) => {
-  e.preventDefault();
-  setIsLoading(true);
-  setError("");
-  setPrediction(null);
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const startTime = Date.now();
+    setIsLoading(true);
+    setError("");
+    setPrediction(null);
+    setLoadingPhase(0);
+    setLoadingMessage(loadingPhases[0].message);
 
-  try {
-    // Map to backend's expected field names and types
-    const backendData = {
-      age: parseInt(formData.age, 10) || 0,
-      workclass: formData.workclass,
-      educational_num: educationMapping[formData.education_num] || 0,
-      marital_status: formData.marital_status,
-      occupation: formData.occupation,
-      relationship: formData.relationship,
-      race: formData.race,
-      gender: formData.gender,
-      hours_per_week: parseInt(formData.hours_per_week, 10) || 0,
-      native_country: formData.native_country,
-      // Default values for required backend fields
-      "capital-gain": 0,
-      "capital-loss": 0
-    };
+    try {
+      // Map to backend's expected field names and types
+      const backendData = {
+        age: parseInt(formData.age, 10) || 0,
+        workclass: formData.workclass,
+        educational_num: educationMapping[formData.education_num] || 0,
+        marital_status: formData.marital_status,
+        occupation: formData.occupation,
+        relationship: formData.relationship,
+        race: formData.race,
+        gender: formData.gender,
+        hours_per_week: parseInt(formData.hours_per_week, 10) || 0,
+        native_country: formData.native_country,
+        "capital-gain": 0,
+        "capital-loss": 0
+      };
 
-    const response = await axios.post(
-      import.meta.env.VITE_BACKEND_URL + "/predict", // Use environment variable for backend URL
-      backendData,  // Axios automatically stringifies to JSON
-      {
-        headers: {
-          "Content-Type": "application/json",
-        },
+      const response = await axios.post(
+        import.meta.env.VITE_BACKEND_URL + "/predict",
+        backendData,
+        {
+          headers: { "Content-Type": "application/json" },
+          timeout: 60000,
+        }
+      );
+      
+      // Calculate actual response time
+      const responseTime = Date.now() - startTime;
+      const MIN_LOADING_TIME = 2000; // Minimum time to show loading animation
+      const timeLeft = MIN_LOADING_TIME - responseTime;
+       if (timeLeft > 0) {
+        // Wait to ensure minimum loading time is met
+        await new Promise(resolve => setTimeout(resolve, timeLeft));
       }
-    );
-    
-    if (response.data.success) {
-      setPrediction(response.data);
-    } else {
-      setError(response.data.message || "Prediction failed");
+      
+      if (response.data.success) {
+        setPrediction(response.data);
+      } else {
+        setError(response.data.message || "Prediction failed");
+      }
+    } catch (error) {
+      setError(
+        error.response?.data?.detail || 
+        "Error connecting to server. Please make sure the model is trained."
+      );
+    } finally {
+      // Complete the loading sequence
+      setLoadingPhase(loadingPhases.length - 1);
+      setLoadingMessage("Finalizing results...");
+      
+      // Small delay to ensure progress reaches 100%
+      setTimeout(() => {
+        setIsLoading(false);
+        setLoadingPhase(0);
+        setLoadingMessage("");
+      }, 500);
     }
-  } catch (error) {
-    setError(
-      error.response?.data?.detail || 
-      "Error connecting to server. Please make sure the model is trained."
-    );
-  } finally {
-    setIsLoading(false);
-  }
-};
+  };
+
+  // Progress bar calculation
+const getProgressPercentage = () => {
+    const totalPhases = loadingPhases.length - 1;
+    
+    // Show 100% when we have results
+    if (!isLoading && prediction) return 100;
+    
+    // During loading, show calculated progress
+    return Math.min((loadingPhase / totalPhases) * 100, 90);
+  };
+
 
   return (
     <div className="max-w-4xl mx-auto p-6">
@@ -406,6 +480,70 @@ const handleSubmit = async (e) => {
             </button>
           </div>
         </form>
+
+        {/* Enhanced Interactive Loading */}
+        {isLoading && (
+          <div className="mt-6 p-6 bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center gap-4 mb-4">
+              <div className="relative">
+                <Server className="h-8 w-8 text-blue-600" />
+                <div className="absolute -top-1 -right-1">
+                  <Wifi className="h-4 w-4 text-green-500 animate-pulse" />
+                </div>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-blue-900 mb-1">
+                  {loadingMessage}
+                </h3>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 bg-blue-200 rounded-full h-2">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${getProgressPercentage()}%` }}
+                    />
+                  </div>
+                  <span className="text-sm font-medium text-blue-700">
+                    {Math.round(getProgressPercentage())}%
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-sm">
+                <div className={`w-2 h-2 rounded-full ${loadingPhase >= 0 ? 'bg-green-500' : 'bg-gray-300'}`} />
+                <span className={loadingPhase === 0 ? 'text-blue-700 font-medium' : 'text-gray-600'}>
+                  Establishing connection
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <div className={`w-2 h-2 rounded-full ${loadingPhase >= 1 ? 'bg-green-500' : 'bg-gray-300'}`} />
+                <span className={loadingPhase === 1 ? 'text-blue-700 font-medium' : 'text-gray-600'}>
+                  Server initialization
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <div className={`w-2 h-2 rounded-full ${loadingPhase >= 2 ? 'bg-green-500' : 'bg-gray-300'}`} />
+                <span className={loadingPhase === 2 ? 'text-blue-700 font-medium' : 'text-gray-600'}>
+                  Loading ML model
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <div className={`w-2 h-2 rounded-full ${loadingPhase >= 3 ? 'bg-green-500' : 'bg-gray-300'}`} />
+                <span className={loadingPhase === 3 ? 'text-blue-700 font-medium' : 'text-gray-600'}>
+                  Processing request
+                </span>
+              </div>
+            </div>
+            
+            <div className="mt-4 p-3 bg-blue-100 rounded-lg">
+              <p className="text-blue-800 text-sm">
+                <strong>First-time setup:</strong> The server may take 30-90 seconds to initialize. 
+                Subsequent requests will be much faster.
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg">
