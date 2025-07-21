@@ -21,23 +21,22 @@ const PredictionForm = () => {
   const [error, setError] = useState("");
   const [loadingPhase, setLoadingPhase] = useState(0);
   const [loadingMessage, setLoadingMessage] = useState("");
-  const [apiResponseTime, setApiResponseTime] = useState(0);
   const simulationTimeoutRef = useRef([]);
+  const requestStartTimeRef = useRef(0);
 
-  // Loading phases with messages
+  // Extended loading phases to handle server startup
   const loadingPhases = [
-    { message: "Connecting to server...", duration: 3000 },
-    { message: "Server is starting up...", duration: 15000 },
-    { message: "Loading ML model...", duration: 10000 },
-    { message: "Preparing prediction...", duration: 5000 },
+    { message: "Connecting to server...", duration: 5000 },
+    { message: "Server is starting up (this may take up to 60 seconds)...", duration: 40000 },
+    { message: "Loading ML model...", duration: 15000 },
+    { message: "Preparing prediction...", duration: 8000 },
     { message: "Finalizing results...", duration: 0 }
   ];
 
-  // Progress through loading phases
- useEffect(() => {
+  // Progress through loading phases based on actual time elapsed
+  useEffect(() => {
     if (!isLoading) return;
 
-    // Clear any existing timeouts
     simulationTimeoutRef.current.forEach(timeout => clearTimeout(timeout));
     simulationTimeoutRef.current = [];
     
@@ -169,9 +168,37 @@ const PredictionForm = () => {
     }));
   };
 
+  // Progress bar calculation based on actual time elapsed
+  const getProgressPercentage = () => {
+    if (!isLoading && prediction) return 100;
+    
+    const currentTime = Date.now() - requestStartTimeRef.current;
+    const totalExpectedTime = loadingPhases.reduce((sum, phase) => sum + phase.duration, 0);
+    
+    // Calculate progress based on actual time elapsed, capped at 90%
+    const timeBasedProgress = Math.min((currentTime / totalExpectedTime) * 100, 90);
+    
+    // Also consider phase-based progress
+    const phaseBasedProgress = Math.min((loadingPhase / (loadingPhases.length - 1)) * 90, 90);
+    
+    // Use the higher of the two for smoother progress
+    return Math.max(timeBasedProgress, phaseBasedProgress);
+  };
+
+  const makeRequest = async (payload) => {
+    return axios.post(
+      import.meta.env.VITE_BACKEND_URL + "/predict",
+      payload,
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 120000, // Increased timeout to 2 minutes
+      }
+    );
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const startTime = Date.now();
+    requestStartTimeRef.current = Date.now();
     setIsLoading(true);
     setError("");
     setPrediction(null);
@@ -179,7 +206,7 @@ const PredictionForm = () => {
     setLoadingMessage(loadingPhases[0].message);
 
     try {
-      // Map to backend's expected field names and types
+      // Prepare payload
       const backendData = {
         age: parseInt(formData.age, 10) || 0,
         workclass: formData.workclass,
@@ -195,22 +222,38 @@ const PredictionForm = () => {
         "capital-loss": 0
       };
 
-      const response = await axios.post(
-        import.meta.env.VITE_BACKEND_URL + "/predict",
-        backendData,
-        {
-          headers: { "Content-Type": "application/json" },
-          timeout: 60000,
+      let response;
+      let retryCount = 0;
+      const maxRetries = 2;
+
+      while (retryCount <= maxRetries) {
+        try {
+          response = await makeRequest(backendData);
+          break; // Success, exit retry loop
+        } catch (error) {
+          retryCount++;
+          
+          if (retryCount > maxRetries) {
+            throw error; // Final attempt failed
+          }
+
+          // If it's a connection error and we haven't exceeded retries
+          if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || 
+              error.response?.status >= 500) {
+            
+            // Wait for server startup on first retry
+            if (retryCount === 1) {
+              setLoadingMessage("Server is initializing, retrying...");
+              // Wait longer for the server to start up
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            } else {
+              // Shorter wait for subsequent retries
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+          } else {
+            throw error; // Non-connection error, don't retry
+          }
         }
-      );
-      
-      // Calculate actual response time
-      const responseTime = Date.now() - startTime;
-      const MIN_LOADING_TIME = 2000; // Minimum time to show loading animation
-      const timeLeft = MIN_LOADING_TIME - responseTime;
-       if (timeLeft > 0) {
-        // Wait to ensure minimum loading time is met
-        await new Promise(resolve => setTimeout(resolve, timeLeft));
       }
       
       if (response.data.success) {
@@ -219,16 +262,35 @@ const PredictionForm = () => {
         setError(response.data.message || "Prediction failed");
       }
     } catch (error) {
-      setError(
-        error.response?.data?.detail || 
-        "Error connecting to server. Please make sure the model is trained."
-      );
+      console.error("Prediction error:", error);
+      
+      let errorMessage = "Error connecting to server. Please try again.";
+      
+      if (error.code === 'ECONNREFUSED') {
+        errorMessage = "Server is starting up. Please wait a moment and try again.";
+      } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+        errorMessage = "Request timed out. Server may still be starting up. Please try again.";
+      } else if (error.response?.data?.detail) {
+        errorMessage = error.response.data.detail;
+      } else if (error.response?.status >= 500) {
+        errorMessage = "Server error occurred. Please try again in a moment.";
+      }
+      
+      setError(errorMessage);
     } finally {
+      // Ensure loading completes properly
+      const elapsedTime = Date.now() - requestStartTimeRef.current;
+      const minLoadingTime = 2000; // Minimum 2 seconds of loading
+      
+      if (elapsedTime < minLoadingTime) {
+        await new Promise(resolve => setTimeout(resolve, minLoadingTime - elapsedTime));
+      }
+
       // Complete the loading sequence
       setLoadingPhase(loadingPhases.length - 1);
       setLoadingMessage("Finalizing results...");
       
-      // Small delay to ensure progress reaches 100%
+      // Small delay to show completion
       setTimeout(() => {
         setIsLoading(false);
         setLoadingPhase(0);
@@ -236,18 +298,6 @@ const PredictionForm = () => {
       }, 500);
     }
   };
-
-  // Progress bar calculation
-const getProgressPercentage = () => {
-    const totalPhases = loadingPhases.length - 1;
-    
-    // Show 100% when we have results
-    if (!isLoading && prediction) return 100;
-    
-    // During loading, show calculated progress
-    return Math.min((loadingPhase / totalPhases) * 100, 90);
-  };
-
 
   return (
     <div className="max-w-4xl mx-auto p-6">
@@ -548,6 +598,9 @@ const getProgressPercentage = () => {
         {error && (
           <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg">
             <p className="text-red-700">{error}</p>
+            <p className="text-red-600 text-sm mt-2">
+              If the server is starting up, please wait a moment and try again.
+            </p>
           </div>
         )}
 
